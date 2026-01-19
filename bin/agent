@@ -1,0 +1,495 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+trap 'say 1 "Command failed: $BASH_COMMAND"' ERR
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT=""
+CHECKOUT_BASE_INPUT=""
+CHECKOUT_BASE=""
+
+say() {
+  if command -v gum >/dev/null 2>&1; then
+    gum style --foreground "$1" "$2"
+  else
+    printf '%s\n' "$2"
+  fi
+}
+
+say_bold() {
+  if command -v gum >/dev/null 2>&1; then
+    gum style --foreground "$1" --bold "$2"
+  else
+    printf '%s\n' "$2"
+  fi
+}
+die() { say 1 "$1"; exit 1; }
+require_cmds() { for cmd in "$@"; do command -v "$cmd" >/dev/null 2>&1 || die "Missing required command: $cmd"; done; }
+require_value() {
+  local flag="$1" value="$2"
+  if [[ -n "$value" && -z "${value// }" ]]; then
+    die "$flag requires a value"
+  fi
+}
+
+COUNT=""
+RESUME=""
+AGENT_CMD="${AGENT_CMD:-}"
+SETUP_CMD="${AGENT_SETUP_CMD:-}"
+REPO_PATH="${AGENT_REPO:-}"
+CHECKOUT_BASE_INPUT="${AGENT_CHECKOUT_BASE:-${CHECKOUT_BASE_INPUT:-}}"
+ACTION=""
+ACTION_ARGS=()
+
+usage() {
+  say_bold 12 "bin/agent - Spawn parallel AI coding agents"
+  gum style --foreground 7 "$(cat <<'EOF'
+
+Usage:
+  bin/agent <count>                     Create <count> new agent checkouts
+  bin/agent --resume=<name1,name2,...>  Resume existing checkouts by name
+  bin/agent list                        List all existing agent checkouts
+  bin/agent jump [name]                 Jump to a checkout (interactive if no name)
+  bin/agent nuke [name1 name2 ...]      Remove checkouts (all if no args)
+
+Options:
+  --resume         Comma-separated list of checkout names to resume
+  --agent-cmd      Command to launch in each checkout
+                  Default: opencode .
+  --setup-cmd      Command to run after checkout
+  --repo           Path to a git repository to manage
+  --checkout-base  Checkout directory (default: .checkouts)
+
+Required Input:
+  <count> or --resume or list/jump/nuke
+
+Env Vars:
+  AGENT_CMD, AGENT_SETUP_CMD, AGENT_REPO, AGENT_CHECKOUT_BASE
+
+Requires:
+  git, tmux, gum, and the agent command
+EOF
+)"
+}
+
+list_checkouts() {
+  if [[ ! -d "$CHECKOUT_BASE" ]]; then
+    say 3 "No checkouts directory found."
+    exit 0
+  fi
+
+  local checkouts
+  checkouts=$(get_existing_checkouts)
+
+  if [[ -z "$checkouts" ]]; then
+    say 3 "No agent checkouts found."
+    exit 0
+  fi
+
+  local base_branch
+  base_branch=$(default_branch)
+
+  say_bold 12 "Agent Checkouts"
+  echo ""
+
+  while IFS= read -r name; do
+    local path="$CHECKOUT_BASE/$name"
+    local branch
+    branch=$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "detached")
+    local commit
+    commit=$(git -C "$path" log -1 --format='%h %s' 2>/dev/null | head -c 60)
+
+    local diffstat added=0 removed=0
+    diffstat=$(git -C "$path" diff --shortstat "$base_branch" 2>/dev/null || echo "")
+    if [[ -n "$diffstat" ]]; then
+      read -r added removed < <(awk '{for (i=1;i<=NF;i++) {if ($i ~ /insertions?/) a=$(i-1); if ($i ~ /deletions?/) d=$(i-1)}} END {print a+0, d+0}' <<<"$diffstat")
+    fi
+
+    local changed_files
+    changed_files=$(git -C "$path" diff --name-only "$base_branch" 2>/dev/null | head -5)
+
+    say_bold 10 "$name"
+    echo "  Branch: $branch"
+    echo "  Commit: $commit"
+    if [[ -n "$diffstat" ]]; then
+      echo "  Changes: +${added:-0} / -${removed:-0}"
+    else
+      echo "  Changes: (none)"
+    fi
+    if [[ -n "$changed_files" ]]; then
+      echo "  Files:"
+      echo "$changed_files" | while read -r f; do echo "    $f"; done
+    fi
+    echo ""
+  done <<< "$checkouts"
+}
+
+jump_to_checkout() {
+  local name="$1"
+
+  [[ -d "$CHECKOUT_BASE" ]] || die "No checkouts directory found."
+
+  local checkouts
+  checkouts=$(get_existing_checkouts)
+  [[ -n "$checkouts" ]] || die "No agent checkouts found."
+
+  if [[ -z "$name" ]]; then
+    local choices=()
+    while IFS= read -r co; do
+      local branch
+      branch=$(git -C "$CHECKOUT_BASE/$co" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "detached")
+      choices+=("$co ($branch)")
+    done <<< "$checkouts"
+
+    local selection
+    selection=$(printf '%s\n' "${choices[@]}" | gum choose --header "Select checkout:")
+    if [[ -z "$selection" ]]; then
+      exit 0
+    fi
+    name="${selection%% (*}"
+  fi
+
+  local path="$CHECKOUT_BASE/$name"
+  if [[ ! -d "$path" ]]; then
+    say 1 "Checkout not found: $name"
+    echo ""
+    say 3 "Available checkouts:"
+    echo "$checkouts" | xargs -I{} echo "  {}"
+    exit 1
+  fi
+
+  cd "$path"
+  exec "$SHELL"
+}
+
+nuke_checkouts() {
+  local names_to_nuke=("$@")
+  local checkouts_to_remove=()
+
+  if [[ ${#names_to_nuke[@]} -eq 0 ]]; then
+    while IFS= read -r name; do
+      [[ -n "$name" ]] && checkouts_to_remove+=("$CHECKOUT_BASE/$name")
+    done < <(get_existing_checkouts)
+  else
+    local missing=()
+    for name in "${names_to_nuke[@]}"; do
+      local path="$CHECKOUT_BASE/$name"
+      if [[ -d "$path" ]]; then
+        checkouts_to_remove+=("$path")
+      else
+        missing+=("$name")
+      fi
+    done
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+      say 1 "Checkouts not found: ${missing[*]}"
+      echo ""
+      say 3 "Available checkouts:"
+      get_existing_checkouts | xargs -I{} echo "  {}"
+      exit 1
+    fi
+  fi
+
+  if [[ ${#checkouts_to_remove[@]} -eq 0 ]]; then
+    say 3 "No checkouts to remove."
+    exit 0
+  fi
+
+  say 3 "Will remove ${#checkouts_to_remove[@]} checkout(s):"
+  for path in "${checkouts_to_remove[@]}"; do
+    echo "  $(basename "$path")"
+  done
+  echo ""
+
+  if ! gum confirm "Proceed?"; then
+    say 245 "Cancelled."
+    exit 0
+  fi
+
+  for path in "${checkouts_to_remove[@]}"; do
+    gum spin --spinner dot --title "Removing $(basename "$path")" -- rm -rf "$path"
+  done
+
+  say 10 "Removed ${#checkouts_to_remove[@]} checkout(s)."
+}
+
+default_branch() {
+  local branch
+  branch=$(git -C "$REPO_ROOT" symbolic-ref --quiet refs/remotes/origin/HEAD 2>/dev/null || true)
+  if [[ -n "$branch" ]]; then
+    echo "${branch##*/}"
+  else
+    echo "main"
+  fi
+}
+
+agent_config_value() {
+  local key="$1"
+  local config_file="$REPO_ROOT/agent.json"
+
+  if [[ ! -f "$config_file" ]]; then
+    return 0
+  fi
+
+  require_cmds ruby
+
+  ruby -rjson -e 'begin; data = JSON.parse(File.read(ARGV[0])); rescue; exit 1; end; value = data[ARGV[1]]; print value if value' "$config_file" "$key" || die "Invalid agent.json: $config_file"
+}
+
+random_checkout_name() {
+  LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 8 || true
+}
+
+get_existing_checkouts() {
+  if [[ -d "$CHECKOUT_BASE" ]]; then
+    ls -1 "$CHECKOUT_BASE" 2>/dev/null | grep -v "^$" || true
+  fi
+}
+
+setup_tmux_session() {
+  local session_name="$1"
+  local first_path="${paths[0]}"
+  local first_name="${names[0]}"
+
+  [[ -n "${TMUX:-}" ]] && tmux detach-client
+
+  tmux new-session -d -s "$session_name" -c "$first_path" "$AGENT_CMD"
+  tmux select-pane -t "$session_name" -T "$first_name"
+
+  for idx in "${!paths[@]}"; do
+    [[ "$idx" -eq 0 ]] && continue
+    tmux split-window -t "$session_name" -c "${paths[$idx]}" "$AGENT_CMD"
+    tmux select-pane -t "$session_name" -T "${names[$idx]}"
+    tmux select-layout -t "$session_name" tiled
+  done
+
+  tmux set-option -t "$session_name" mouse on
+  tmux set-option -t "$session_name" allow-rename off
+  tmux set-option -wg -t "$session_name" allow-set-title off
+  tmux set-option -t "$session_name" pane-border-status top
+  tmux set-option -t "$session_name" pane-border-format " #{pane_title} "
+  tmux set-option -t "$session_name" destroy-unattached on
+  tmux bind-key -T prefix Q kill-session
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --resume=*)
+      RESUME="${1#--resume=}"
+      shift
+      ;;
+    --agent-cmd=*)
+      AGENT_CMD="${1#--agent-cmd=}"
+      shift
+      ;;
+    --agent-cmd)
+      shift
+      AGENT_CMD="${1:-}"
+      shift
+      ;;
+    --setup-cmd=*)
+      SETUP_CMD="${1#--setup-cmd=}"
+      shift
+      ;;
+    --setup-cmd)
+      shift
+      SETUP_CMD="${1:-}"
+      shift
+      ;;
+    --repo=*)
+      REPO_PATH="${1#--repo=}"
+      shift
+      ;;
+    --repo)
+      shift
+      REPO_PATH="${1:-}"
+      shift
+      ;;
+    --checkout-base=*)
+      CHECKOUT_BASE_INPUT="${1#--checkout-base=}"
+      shift
+      ;;
+    --checkout-base)
+      shift
+      CHECKOUT_BASE_INPUT="${1:-}"
+      shift
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    list)
+      ACTION="list"
+      shift
+      break
+      ;;
+    jump)
+      ACTION="jump"
+      shift
+      if [[ -n "${1:-}" ]] && [[ "$1" != -* ]]; then
+        ACTION_ARGS=("$1")
+        shift
+      fi
+      break
+      ;;
+    nuke)
+      ACTION="nuke"
+      shift
+      ACTION_ARGS=("$@")
+      break
+      ;;
+    -* )
+      usage
+      exit 1
+      ;;
+    *)
+      if [[ -z "$COUNT" ]]; then
+        COUNT="$1"
+      else
+        usage
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+ done
+
+require_cmds git tmux gum
+
+require_value --repo "$REPO_PATH"
+require_value --checkout-base "$CHECKOUT_BASE_INPUT"
+require_value --agent-cmd "$AGENT_CMD"
+require_value --setup-cmd "$SETUP_CMD"
+
+if [[ -n "$REPO_PATH" ]]; then
+  REPO_ROOT=$(cd "$REPO_PATH" && git rev-parse --show-toplevel 2>/dev/null || true)
+else
+  REPO_ROOT="$DEFAULT_REPO_ROOT"
+fi
+[[ -n "$REPO_ROOT" ]] || die "Repository not found: ${REPO_PATH:-$DEFAULT_REPO_ROOT}"
+
+if [[ -n "$CHECKOUT_BASE_INPUT" ]]; then
+  CHECKOUT_BASE="$CHECKOUT_BASE_INPUT"
+  [[ "$CHECKOUT_BASE_INPUT" != /* ]] && CHECKOUT_BASE="$REPO_ROOT/$CHECKOUT_BASE_INPUT"
+else
+  CHECKOUT_BASE="$REPO_ROOT/.checkouts"
+fi
+
+cd "$REPO_ROOT"
+DEFAULT_BRANCH=$(default_branch)
+
+CONFIG_SETUP_CMD=$(agent_config_value setup)
+CONFIG_RUN_CMD=$(agent_config_value run)
+
+if [[ -z "$SETUP_CMD" ]]; then
+  SETUP_CMD="$CONFIG_SETUP_CMD"
+fi
+
+if [[ -z "$AGENT_CMD" ]]; then
+  AGENT_CMD="${CONFIG_RUN_CMD:-opencode .}"
+fi
+
+AGENT_CMD_NAME="${AGENT_CMD%% *}"
+require_cmds "$AGENT_CMD_NAME"
+
+if [[ -n "$ACTION" ]] && { [[ -n "$COUNT" ]] || [[ -n "$RESUME" ]]; }; then
+  die "Command conflicts with count or --resume"
+fi
+
+[[ -n "$COUNT" && -n "$RESUME" ]] && die "Cannot use count with --resume"
+
+case "$ACTION" in
+  list)
+    list_checkouts
+    exit 0
+    ;;
+  jump)
+    jump_to_checkout "${ACTION_ARGS[0]:-}"
+    exit 0
+    ;;
+  nuke)
+    nuke_checkouts "${ACTION_ARGS[@]}"
+    exit 0
+    ;;
+esac
+
+if [[ -n "$RESUME" ]]; then
+  IFS=',' read -ra raw_names <<< "$RESUME"
+  names=()
+  paths=()
+  missing=()
+
+  for raw_name in "${raw_names[@]}"; do
+    name=$(echo "$raw_name" | xargs)
+    [[ -z "$name" ]] && continue
+    path="$CHECKOUT_BASE/$name"
+    if [[ -d "$path" ]]; then
+      names+=("$name")
+      paths+=("$path")
+    else
+      missing+=("$name")
+    fi
+  done
+
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    say 1 "Checkouts not found: ${missing[*]}"
+    echo ""
+    say 3 "Available checkouts:"
+    get_existing_checkouts | xargs -I{} echo "  {}"
+    exit 1
+  fi
+
+  [[ ${#paths[@]} -gt 0 ]] || die "No valid checkouts specified."
+
+  session_name="agent-resume-$(date +%H%M%S)"
+  setup_tmux_session "$session_name"
+  say 10 "Resuming agents: ${names[*]}"
+  tmux attach -t "$session_name"
+  exit 0
+fi
+
+[[ -n "$COUNT" ]] || { usage; exit 1; }
+
+if ! [[ "$COUNT" =~ ^[0-9]+$ ]] || [[ "$COUNT" -lt 1 ]]; then
+  die "Count must be a positive integer."
+fi
+
+gum spin --spinner dot --title "Checking out $DEFAULT_BRANCH" -- git checkout "$DEFAULT_BRANCH"
+
+gum spin --spinner dot --title "Pulling latest $DEFAULT_BRANCH" -- git pull --ff-only
+
+mkdir -p "$CHECKOUT_BASE"
+
+existing_checkouts=$(get_existing_checkouts)
+names=()
+paths=()
+
+while [[ ${#names[@]} -lt $COUNT ]]; do
+  name=$(random_checkout_name)
+  if echo "$existing_checkouts" | grep -q "^${name}$"; then
+    continue
+  fi
+  if printf '%s\n' "${names[@]}" | grep -q "^${name}$"; then
+    continue
+  fi
+  names+=("$name")
+done
+
+for name in "${names[@]}"; do
+  path="$CHECKOUT_BASE/$name"
+  gum spin --spinner dot --title "Creating checkout: $name" -- git clone --branch "$DEFAULT_BRANCH" --single-branch . "$path"
+  if [[ -n "$SETUP_CMD" ]]; then
+    pushd "$path" >/dev/null
+    gum spin --spinner dot --title "Running setup in checkout: $name" -- bash -lc "$SETUP_CMD"
+    popd >/dev/null
+  fi
+  paths+=("$path")
+done
+
+session_name="agent-$(date +%Y%m%d-%H%M%S)"
+setup_tmux_session "$session_name"
+say 10 "Agent checkouts: ${names[*]}"
+say 10 "Attaching to tmux session: ${session_name}"
+tmux attach -t "$session_name"
