@@ -53,7 +53,7 @@ Flags:
 
 - `--agent-cmd` sets the command to run in each checkout.
 - `--setup-cmd` runs after each checkout is created.
-- `--repo` points at the git repo to manage.
+- `--repo` points at the git repo to manage (default: current directory).
 - `--checkout-base` sets the checkout directory.
 
 Env vars:

@@ -4,8 +4,6 @@ set -euo pipefail
 
 trap 'say 1 "Command failed: $BASH_COMMAND"' ERR
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT=""
 CHECKOUT_BASE_INPUT=""
 CHECKOUT_BASE=""
@@ -59,7 +57,7 @@ Options:
   --agent-cmd      Command to launch in each checkout
                   Default: opencode .
   --setup-cmd      Command to run after checkout
-  --repo           Path to a git repository to manage
+  --repo           Path to a git repository to manage (default: current dir)
   --checkout-base  Checkout directory (default: .checkouts)
 
 Required Input:
@@ -363,12 +361,9 @@ require_value --checkout-base "$CHECKOUT_BASE_INPUT"
 require_value --agent-cmd "$AGENT_CMD"
 require_value --setup-cmd "$SETUP_CMD"
 
-if [[ -n "$REPO_PATH" ]]; then
-  REPO_ROOT=$(cd "$REPO_PATH" && git rev-parse --show-toplevel 2>/dev/null || true)
-else
-  REPO_ROOT="$DEFAULT_REPO_ROOT"
-fi
-[[ -n "$REPO_ROOT" ]] || die "Repository not found: ${REPO_PATH:-$DEFAULT_REPO_ROOT}"
+REPO_CANDIDATE="${REPO_PATH:-$PWD}"
+REPO_ROOT=$(cd "$REPO_CANDIDATE" && git rev-parse --show-toplevel 2>/dev/null || true)
+[[ -n "$REPO_ROOT" ]] || die "Repository not found: $REPO_CANDIDATE"
 
 if [[ -n "$CHECKOUT_BASE_INPUT" ]]; then
   CHECKOUT_BASE="$CHECKOUT_BASE_INPUT"
