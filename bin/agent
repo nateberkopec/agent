@@ -270,7 +270,7 @@ setup_tmux_session() {
   tmux set-option -wg -t "$session_name" allow-set-title off
   tmux set-option -t "$session_name" pane-border-status top
   tmux set-option -t "$session_name" pane-border-format " #{pane_title} "
-  tmux set-option -t "$session_name" destroy-unattached on
+  tmux set-hook -t "$session_name" client-detached 'if -F "#{==:#{session_attached},0}" "kill-session -t #{session_name}"'
   tmux bind-key -T prefix Q kill-session
 }
 
