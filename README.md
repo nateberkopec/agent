@@ -1,6 +1,6 @@
 # Agent
 
-Agent spawns parallel git checkouts and opens a tmux session to run a command in each checkout. It is built to run AI coding agents fast, but you can use any command.
+Agent spawns parallel repo copies and opens a tmux session to run a command in each copy. Each copy replaces `.git` with a shallow clone of the default branch.
 
 > [!WARNING]
 > This project is 100% LLM-generated, and I have not fully verified its operation or contents.
@@ -27,13 +27,13 @@ Install to a custom directory:
 
 ## Usage
 
-Create new checkouts:
+Create new copies:
 
 ```fish
 agent 4
 ```
 
-Resume existing checkouts:
+Resume existing copies:
 
 ```fish
 agent --resume=abc123,def456
@@ -51,10 +51,10 @@ agent nuke
 
 Flags:
 
-- `--agent-cmd` sets the command to run in each checkout.
-- `--setup-cmd` runs after each checkout is created.
+- `--agent-cmd` sets the command to run in each copy.
+- `--setup-cmd` runs after each copy is created.
 - `--repo` points at the git repo to manage (default: current directory).
-- `--checkout-base` sets the checkout directory.
+- `--checkout-base` sets the copy directory.
 
 Env vars:
 
@@ -75,7 +75,8 @@ You need these commands on your PATH:
 - `git`
 - `tmux`
 - `gum`
-- the command you run in each checkout (default: `opencode`)
+- `rsync`
+- the command you run in each copy (default: `opencode`)
 
 ## Development
 

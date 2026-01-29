@@ -46,19 +46,19 @@ usage() {
   gum style --foreground 7 "$(cat <<'EOF'
 
 Usage:
-  bin/agent <count>                     Create <count> new agent checkouts
-  bin/agent --resume=<name1,name2,...>  Resume existing checkouts by name
-  bin/agent list                        List all existing agent checkouts
-  bin/agent jump [name]                 Jump to a checkout (interactive if no name)
-  bin/agent nuke [name1 name2 ...]      Remove checkouts (all if no args)
+  bin/agent <count>                     Create <count> new agent copies
+  bin/agent --resume=<name1,name2,...>  Resume existing copies by name
+  bin/agent list                        List all existing agent copies
+  bin/agent jump [name]                 Jump to a copy (interactive if no name)
+  bin/agent nuke [name1 name2 ...]      Remove copies (all if no args)
 
 Options:
-  --resume         Comma-separated list of checkout names to resume
-  --agent-cmd      Command to launch in each checkout
+  --resume         Comma-separated list of copy names to resume
+  --agent-cmd      Command to launch in each copy
                   Default: opencode .
-  --setup-cmd      Command to run after checkout
+  --setup-cmd      Command to run after copy
   --repo           Path to a git repository to manage (default: current dir)
-  --checkout-base  Checkout directory (default: .checkouts)
+  --checkout-base  Copy directory (default: .checkouts)
 
 Required Input:
   <count> or --resume or list/jump/nuke
@@ -67,14 +67,14 @@ Env Vars:
   AGENT_CMD, AGENT_SETUP_CMD, AGENT_REPO, AGENT_CHECKOUT_BASE
 
 Requires:
-  git, tmux, gum, and the agent command
+  git, tmux, gum, rsync, and the agent command
 EOF
 )"
 }
 
 list_checkouts() {
   if [[ ! -d "$CHECKOUT_BASE" ]]; then
-    say 3 "No checkouts directory found."
+    say 3 "No copies directory found."
     exit 0
   fi
 
@@ -82,14 +82,14 @@ list_checkouts() {
   checkouts=$(get_existing_checkouts)
 
   if [[ -z "$checkouts" ]]; then
-    say 3 "No agent checkouts found."
+    say 3 "No agent copies found."
     exit 0
   fi
 
   local base_branch
   base_branch=$(default_branch)
 
-  say_bold 12 "Agent Checkouts"
+  say_bold 12 "Agent Copies"
   echo ""
 
   while IFS= read -r name; do
@@ -127,11 +127,11 @@ list_checkouts() {
 jump_to_checkout() {
   local name="$1"
 
-  [[ -d "$CHECKOUT_BASE" ]] || die "No checkouts directory found."
+  [[ -d "$CHECKOUT_BASE" ]] || die "No copies directory found."
 
   local checkouts
   checkouts=$(get_existing_checkouts)
-  [[ -n "$checkouts" ]] || die "No agent checkouts found."
+  [[ -n "$checkouts" ]] || die "No agent copies found."
 
   if [[ -z "$name" ]]; then
     local choices=()
@@ -142,7 +142,7 @@ jump_to_checkout() {
     done <<< "$checkouts"
 
     local selection
-    selection=$(printf '%s\n' "${choices[@]}" | gum choose --header "Select checkout:")
+    selection=$(printf '%s\n' "${choices[@]}" | gum choose --header "Select copy:")
     if [[ -z "$selection" ]]; then
       exit 0
     fi
@@ -151,9 +151,9 @@ jump_to_checkout() {
 
   local path="$CHECKOUT_BASE/$name"
   if [[ ! -d "$path" ]]; then
-    say 1 "Checkout not found: $name"
+    say 1 "Copy not found: $name"
     echo ""
-    say 3 "Available checkouts:"
+    say 3 "Available copies:"
     echo "$checkouts" | xargs -I{} echo "  {}"
     exit 1
   fi
@@ -182,20 +182,20 @@ nuke_checkouts() {
     done
 
     if [[ ${#missing[@]} -gt 0 ]]; then
-      say 1 "Checkouts not found: ${missing[*]}"
+      say 1 "Copies not found: ${missing[*]}"
       echo ""
-      say 3 "Available checkouts:"
+      say 3 "Available copies:"
       get_existing_checkouts | xargs -I{} echo "  {}"
       exit 1
     fi
   fi
 
   if [[ ${#checkouts_to_remove[@]} -eq 0 ]]; then
-    say 3 "No checkouts to remove."
+    say 3 "No copies to remove."
     exit 0
   fi
 
-  say 3 "Will remove ${#checkouts_to_remove[@]} checkout(s):"
+  say 3 "Will remove ${#checkouts_to_remove[@]} copies:"
   for path in "${checkouts_to_remove[@]}"; do
     echo "  $(basename "$path")"
   done
@@ -210,7 +210,7 @@ nuke_checkouts() {
     gum spin --spinner dot --title "Removing $(basename "$path")" -- rm -rf "$path"
   done
 
-  say 10 "Removed ${#checkouts_to_remove[@]} checkout(s)."
+  say 10 "Removed ${#checkouts_to_remove[@]} copies."
 }
 
 default_branch() {
@@ -354,7 +354,7 @@ while [[ $# -gt 0 ]]; do
   esac
  done
 
-require_cmds git tmux gum
+require_cmds git tmux gum rsync
 
 require_value --repo "$REPO_PATH"
 require_value --checkout-base "$CHECKOUT_BASE_INPUT"
@@ -388,6 +388,12 @@ fi
 
 AGENT_CMD_NAME="${AGENT_CMD%% *}"
 require_cmds "$AGENT_CMD_NAME"
+
+COPY_EXCLUDES=(--exclude ".git" --exclude ".checkouts")
+if [[ "$CHECKOUT_BASE" == "$REPO_ROOT/"* ]]; then
+  checkout_rel="${CHECKOUT_BASE#$REPO_ROOT/}"
+  [[ -n "$checkout_rel" ]] && COPY_EXCLUDES+=(--exclude "$checkout_rel")
+fi
 
 if [[ -n "$ACTION" ]] && { [[ -n "$COUNT" ]] || [[ -n "$RESUME" ]]; }; then
   die "Command conflicts with count or --resume"
@@ -429,14 +435,14 @@ if [[ -n "$RESUME" ]]; then
   done
 
   if [[ ${#missing[@]} -gt 0 ]]; then
-    say 1 "Checkouts not found: ${missing[*]}"
+    say 1 "Copies not found: ${missing[*]}"
     echo ""
-    say 3 "Available checkouts:"
+    say 3 "Available copies:"
     get_existing_checkouts | xargs -I{} echo "  {}"
     exit 1
   fi
 
-  [[ ${#paths[@]} -gt 0 ]] || die "No valid checkouts specified."
+  [[ ${#paths[@]} -gt 0 ]] || die "No valid copies specified."
 
   session_name="agent-resume-$(date +%H%M%S)"
   setup_tmux_session "$session_name"
@@ -450,10 +456,6 @@ fi
 if ! [[ "$COUNT" =~ ^[0-9]+$ ]] || [[ "$COUNT" -lt 1 ]]; then
   die "Count must be a positive integer."
 fi
-
-gum spin --spinner dot --title "Checking out $DEFAULT_BRANCH" -- git checkout "$DEFAULT_BRANCH"
-
-gum spin --spinner dot --title "Pulling latest $DEFAULT_BRANCH" -- git pull --ff-only
 
 mkdir -p "$CHECKOUT_BASE"
 
@@ -474,10 +476,16 @@ done
 
 for name in "${names[@]}"; do
   path="$CHECKOUT_BASE/$name"
-  gum spin --spinner dot --title "Creating checkout: $name" -- git clone --branch "$DEFAULT_BRANCH" --single-branch . "$path"
+  gum spin --spinner dot --title "Copying repo: $name" -- rsync -a "${COPY_EXCLUDES[@]}" "$REPO_ROOT/" "$path/"
+  tmp_git=$(mktemp -d)
+  gum spin --spinner dot --title "Creating shallow git: $name" -- git clone --depth 1 --branch "$DEFAULT_BRANCH" --single-branch --no-checkout --no-local "$REPO_ROOT" "$tmp_git"
+  rm -rf "$path/.git"
+  mv "$tmp_git/.git" "$path/.git"
+  rm -rf "$tmp_git"
+  git -C "$path" reset --mixed "$DEFAULT_BRANCH" >/dev/null
   if [[ -n "$SETUP_CMD" ]]; then
     pushd "$path" >/dev/null
-    gum spin --spinner dot --title "Running setup in checkout: $name" -- bash -lc "$SETUP_CMD"
+    gum spin --spinner dot --title "Running setup in copy: $name" -- bash -lc "$SETUP_CMD"
     popd >/dev/null
   fi
   paths+=("$path")
@@ -485,6 +493,6 @@ done
 
 session_name="agent-$(date +%Y%m%d-%H%M%S)"
 setup_tmux_session "$session_name"
-say 10 "Agent checkouts: ${names[*]}"
+say 10 "Agent copies: ${names[*]}"
 say 10 "Attaching to tmux session: ${session_name}"
 tmux attach -t "$session_name"
