@@ -1,6 +1,6 @@
 # Agent
 
-Agent spawns parallel repo copies and opens a tmux session to run a command in each copy. Each copy replaces `.git` with a shallow clone of the default branch.
+Agent spawns parallel repo copies and opens a tmux session to run a command in each copy. Each copy preserves untracked files, then replaces `.git` with a shallow clone and hard-resets tracked files to the latest default branch.
 
 > [!WARNING]
 > This project is 100% LLM-generated, and I have not fully verified its operation or contents.

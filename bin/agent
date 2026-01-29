@@ -395,6 +395,8 @@ if [[ "$CHECKOUT_BASE" == "$REPO_ROOT/"* ]]; then
   [[ -n "$checkout_rel" ]] && COPY_EXCLUDES+=(--exclude "$checkout_rel")
 fi
 
+ORIGIN_URL=$(git -C "$REPO_ROOT" config --get remote.origin.url || true)
+
 if [[ -n "$ACTION" ]] && { [[ -n "$COUNT" ]] || [[ -n "$RESUME" ]]; }; then
   die "Command conflicts with count or --resume"
 fi
@@ -474,15 +476,21 @@ while [[ ${#names[@]} -lt $COUNT ]]; do
   names+=("$name")
 done
 
+base_git=$(mktemp -d)
+if [[ -n "$ORIGIN_URL" ]]; then
+  gum spin --spinner dot --title "Fetching $DEFAULT_BRANCH" -- git clone --depth 1 --branch "$DEFAULT_BRANCH" --single-branch --no-checkout "$ORIGIN_URL" "$base_git"
+else
+  gum spin --spinner dot --title "Preparing $DEFAULT_BRANCH" -- git clone --depth 1 --branch "$DEFAULT_BRANCH" --single-branch --no-checkout --no-local "$REPO_ROOT" "$base_git"
+fi
+trap 'rm -rf "$base_git"' EXIT
+
 for name in "${names[@]}"; do
   path="$CHECKOUT_BASE/$name"
-  gum spin --spinner dot --title "Copying repo: $name" -- rsync -a "${COPY_EXCLUDES[@]}" "$REPO_ROOT/" "$path/"
-  tmp_git=$(mktemp -d)
-  gum spin --spinner dot --title "Creating shallow git: $name" -- git clone --depth 1 --branch "$DEFAULT_BRANCH" --single-branch --no-checkout --no-local "$REPO_ROOT" "$tmp_git"
+  gum spin --spinner dot --title "Copying repo: $name" -- rsync -a --no-specials --no-devices "${COPY_EXCLUDES[@]}" "$REPO_ROOT/" "$path/"
   rm -rf "$path/.git"
-  mv "$tmp_git/.git" "$path/.git"
-  rm -rf "$tmp_git"
-  git -C "$path" reset --mixed "$DEFAULT_BRANCH" >/dev/null
+  gum spin --spinner dot --title "Copying git metadata: $name" -- rsync -a "$base_git/.git/" "$path/.git/"
+  git -C "$path" checkout -B "$DEFAULT_BRANCH" "origin/$DEFAULT_BRANCH" --force >/dev/null
+  git -C "$path" reset --hard "origin/$DEFAULT_BRANCH" >/dev/null
   if [[ -n "$SETUP_CMD" ]]; then
     pushd "$path" >/dev/null
     gum spin --spinner dot --title "Running setup in copy: $name" -- bash -lc "$SETUP_CMD"
